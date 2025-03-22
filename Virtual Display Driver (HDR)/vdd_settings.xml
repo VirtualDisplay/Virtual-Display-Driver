@@ -93,5 +93,10 @@
 		<!--Enable this to prevent manufacturer spoofing when using custom edid. Please only do so if you need to!-->
 		<EdidCeaOverride>false</EdidCeaOverride>
 		<!--Enable this to override or add hard coded cea-extension block to custom Edid support allowing you to enable HDR-->
+		<parse_edid_res>false</parse_edid_res>
+		<!-- Set to true to overwrite all resolutions from settings-xml with ones parsed from user_edid.bin -->
 	</edid>
+	<!-- Sort order for videmodes, whenever there are more then 92 modes it will cut the last ones(lower res when x-desc) -->
+	<!-- Alternatives: x-desc, x-ass, y-desc, y-ass, ref.rate-desc, ref.rate-ass	-->
+	<res-sort>x-desc</res-sort>
 </vdd_settings>

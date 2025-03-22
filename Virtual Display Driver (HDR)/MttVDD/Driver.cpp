@@ -13,6 +13,7 @@ Environment:
 --*/
 
 #include "Driver.h"
+#include "edid_parser.cpp"
 //#include "Driver.tmh"
 #include<fstream>
 #include<sstream>
@@ -36,6 +37,7 @@ Environment:
 #include <cwchar>
 #include <map>
 #include <set>
+#include <algorithm>
 
 
 
@@ -1492,13 +1494,16 @@ vector<string> split(string& input, char delimiter)
 void loadSettings() {
 	const wstring settingsname = confpath + L"\\vdd_settings.xml";
 	const wstring& filename = settingsname;
+	bool parseEdidRes = false; // Default to false unless specified in XML
+	wstring resSort;
+
 	if (PathFileExistsW(filename.c_str())) {
 		CComPtr<IStream> pStream;
 		CComPtr<IXmlReader> pReader;
 		HRESULT hr = SHCreateStreamOnFileW(filename.c_str(), STGM_READ, &pStream);
 		if (FAILED(hr)) {
 			vddlog("e", "Loading Settings: Failed to create file stream.");
-			return; 
+			return;
 		}
 		hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, NULL);
 		if (FAILED(hr)) {
@@ -1517,6 +1522,43 @@ void loadSettings() {
 		UINT cwchLocalName;
 		UINT cwchValue;
 		wstring currentElement;
+
+    // Sort and cap monitorModes based on res-sort
+    if (!monitorModes.empty()) {
+        // Parse res-sort value
+        bool descending = resSort.find(L"desc") != wstring::npos;
+        if (resSort.find(L"x") != wstring::npos) {
+            std::sort(monitorModes.begin(), monitorModes.end(),
+                      [descending](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+                          return descending ? std::get<0>(a) > std::get<0>(b) : std::get<0>(a) < std::get<0>(b);
+                      });
+        }
+        else if (resSort.find(L"y") != wstring::npos) {
+            std::sort(monitorModes.begin(), monitorModes.end(),
+                      [descending](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+                          return descending ? std::get<1>(a) > std::get<1>(b) : std::get<1>(a) < std::get<1>(b);
+                      });
+        }
+        else if (resSort.find(L"ref.rate") != wstring::npos) {
+            std::sort(monitorModes.begin(), monitorModes.end(),
+                      [descending](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+                          return descending ? std::get<2>(a) > std::get<2>(b) : std::get<2>(a) < std::get<2>(b);
+                      });
+        }
+        else {
+            // Default to x-desc if res-sort is invalid
+            std::sort(monitorModes.begin(), monitorModes.end(),
+                      [](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+                          return std::get<0>(a) > std::get<0>(b);
+                      });
+        }
+
+        // Cap at 92 modes, keeping highest values based on sort
+        if (monitorModes.size() > 92) {
+            monitorModes.resize(92);
+            vddlog("i", "Capped monitorModes to 92, removed lowest-value modes based on sort");
+        }
+    }
 		wstring width, height, refreshRate;
 		vector<tuple<int, int, int, int>> res;
 		wstring gpuFriendlyName;
@@ -1528,16 +1570,12 @@ void loadSettings() {
 			switch (nodeType) {
 			case XmlNodeType_Element:
 				hr = pReader->GetLocalName(&pwszLocalName, &cwchLocalName);
-				if (FAILED(hr)) {
-					return;
-				}
+				if (FAILED(hr)) return;
 				currentElement = wstring(pwszLocalName, cwchLocalName);
 				break;
 			case XmlNodeType_Text:
 				hr = pReader->GetValue(&pwszValue, &cwchValue);
-				if (FAILED(hr)) {
-					return;
-				}
+				if (FAILED(hr)) return;
 				if (currentElement == L"count") {
 					monitorcount = stoi(wstring(pwszValue, cwchValue));
 					if (monitorcount == 0) {
@@ -1550,25 +1588,18 @@ void loadSettings() {
 				}
 				else if (currentElement == L"width") {
 					width = wstring(pwszValue, cwchValue);
-					if (width.empty()) {
-						width = L"800";
-					}
+					if (width.empty()) width = L"800";
 				}
 				else if (currentElement == L"height") {
 					height = wstring(pwszValue, cwchValue);
-					if (height.empty()) {
-						height = L"600";
-					}
+					if (height.empty()) height = L"600";
 					resolutions.insert(make_tuple(stoi(width), stoi(height)));
 				}
 				else if (currentElement == L"refresh_rate") {
 					refreshRate = wstring(pwszValue, cwchValue);
-					if (refreshRate.empty()) {
-						refreshRate = L"30";
-					}
+					if (refreshRate.empty()) refreshRate = L"30";
 					int vsync_num, vsync_den;
 					float_to_vsync(stof(refreshRate), vsync_num, vsync_den);
-
 					res.push_back(make_tuple(stoi(width), stoi(height), vsync_num, vsync_den));
 					stringstream ss;
 					ss << "Added: " << stoi(width) << "x" << stoi(height) << " @ " << vsync_num << "/" << vsync_den << "Hz";
@@ -1577,155 +1608,155 @@ void loadSettings() {
 				else if (currentElement == L"g_refresh_rate") {
 					globalRefreshRates.push_back(stoi(wstring(pwszValue, cwchValue)));
 				}
+				else if (currentElement == L"parse_edid_res") {
+					wstring value(pwszValue, cwchValue);
+					parseEdidRes = (value == L"true" || value == L"1"); // Accept "true" or "1"
+				}
+				else if (currentElement == L"res-sort") {
+					resSort = wstring(pwszValue, cwchValue);
+				}
 				break;
 			}
 		}
-
-		/*
-		* This is for res testing, stores each resolution then iterates through each global adding a res for each one
-		* 
-		
-		for (const auto& resTuple : resolutions) {
-			stringstream ss;
-			ss << get<0>(resTuple) << "x" << get<1>(resTuple);
-			vddlog("t", ss.str().c_str());
-		}
-
-		for (const auto& globalRate : globalRefreshRates) {
-			stringstream ss;
-			ss << globalRate << " Hz";
-			vddlog("t", ss.str().c_str());
-		}
-		*/
 
 		for (int globalRate : globalRefreshRates) {
 			for (const auto& resTuple : resolutions) {
 				int global_width = get<0>(resTuple);
 				int global_height = get<1>(resTuple);
-
 				int vsync_num, vsync_den;
 				float_to_vsync(static_cast<float>(globalRate), vsync_num, vsync_den);
 				res.push_back(make_tuple(global_width, global_height, vsync_num, vsync_den));
 			}
 		}
 
-		/*
-		* logging all resolutions after added global
-		* 
-		for (const auto& tup : res) {
-			stringstream ss;
-			ss << "("
-				<< get<0>(tup) << ", "
-				<< get<1>(tup) << ", "
-				<< get<2>(tup) << ", "
-				<< get<3>(tup) << ")";
-			vddlog("t", ss.str().c_str());
-		}
-		
-		*/
-
-
 		numVirtualDisplays = monitorcount;
 		gpuname = gpuFriendlyName;
 		monitorModes = res;
-		vddlog("i","Using vdd_settings.xml");
-		return;
+		vddlog("i", "Using vdd_settings.xml");
 	}
-	const wstring optionsname = confpath + L"\\option.txt";
-	ifstream ifs(optionsname);
-	if (ifs.is_open()) {
-    string line;
-    if (getline(ifs, line) && !line.empty()) {
-        numVirtualDisplays = stoi(line);
-        vector<tuple<int, int, int, int>> res; 
+	else {
+		const wstring optionsname = confpath + L"\\option.txt";
+		ifstream ifs(optionsname);
+		if (ifs.is_open()) {
+			string line;
+			if (getline(ifs, line) && !line.empty()) {
+				numVirtualDisplays = stoi(line);
+				vector<tuple<int, int, int, int>> res;
 
-        while (getline(ifs, line)) {
-            vector<string> strvec = split(line, ',');
-            if (strvec.size() == 3 && strvec[0].substr(0, 1) != "#") {
-                int vsync_num, vsync_den;
-                float_to_vsync(stof(strvec[2]), vsync_num, vsync_den); 
-                res.push_back({ stoi(strvec[0]), stoi(strvec[1]), vsync_num, vsync_den });
-            }
-        }
+				while (getline(ifs, line)) {
+					vector<string> strvec = split(line, ',');
+					if (strvec.size() == 3 && strvec[0].substr(0, 1) != "#") {
+						int vsync_num, vsync_den;
+						float_to_vsync(stof(strvec[2]), vsync_num, vsync_den);
+						res.push_back({ stoi(strvec[0]), stoi(strvec[1]), vsync_num, vsync_den });
+					}
+				}
 
-        vddlog("i", "Using option.txt");
-        monitorModes = res;
-        for (const auto& mode : res) {
-            int width, height, vsync_num, vsync_den;
-            tie(width, height, vsync_num, vsync_den) = mode;
-            stringstream ss;
-            ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
-            vddlog("d", ss.str().c_str());
-        }
-		return;
-    } else {
-        vddlog("w", "option.txt is empty or the first line is invalid. Enabling Fallback");
-    }
-}
+				vddlog("i", "Using option.txt");
+				monitorModes = res;
+				for (const auto& mode : res) {
+					int width, height, vsync_num, vsync_den;
+					tie(width, height, vsync_num, vsync_den) = mode;
+					stringstream ss;
+					ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
+					vddlog("d", ss.str().c_str());
+				}
+			}
+			else {
+				vddlog("w", "option.txt is empty or the first line is invalid. Enabling Fallback");
+			}
+			ifs.close();
+		}
+		else {
+			numVirtualDisplays = 1;
+			vector<tuple<int, int, int, int>> res;
+			vector<tuple<int, int, float>> fallbackRes = {
+				{800, 600, 30.0f}, {800, 600, 60.0f}, {800, 600, 90.0f}, {800, 600, 120.0f}, {800, 600, 144.0f}, {800, 600, 165.0f},
+				{1280, 720, 30.0f}, {1280, 720, 60.0f}, {1280, 720, 90.0f}, {1280, 720, 130.0f}, {1280, 720, 144.0f}, {1280, 720, 165.0f},
+				{1366, 768, 30.0f}, {1366, 768, 60.0f}, {1366, 768, 90.0f}, {1366, 768, 120.0f}, {1366, 768, 144.0f}, {1366, 768, 165.0f},
+				{1920, 1080, 30.0f}, {1920, 1080, 60.0f}, {1920, 1080, 90.0f}, {1920, 1080, 120.0f}, {1920, 1080, 144.0f}, {1920, 1080, 165.0f},
+				{2560, 1440, 30.0f}, {2560, 1440, 60.0f}, {2560, 1440, 90.0f}, {2560, 1440, 120.0f}, {2560, 1440, 144.0f}, {2560, 1440, 165.0f},
+				{3840, 2160, 30.0f}, {3840, 2160, 60.0f}, {3840, 2160, 90.0f}, {3840, 2160, 120.0f}, {3840, 2160, 144.0f}, {3840, 2160, 165.0f}
+			};
 
-
-	numVirtualDisplays = 1;
-	vector<tuple<int, int, int, int>> res;
-	vector<tuple<int, int, float>> fallbackRes = {
-		{800, 600, 30.0f},
-		{800, 600, 60.0f},
-		{800, 600, 90.0f},
-		{800, 600, 120.0f},
-		{800, 600, 144.0f},
-		{800, 600, 165.0f},
-		{1280, 720, 30.0f},
-		{1280, 720, 60.0f},
-		{1280, 720, 90.0f},
-		{1280, 720, 130.0f},
-		{1280, 720, 144.0f},
-		{1280, 720, 165.0f},
-		{1366, 768, 30.0f},
-		{1366, 768, 60.0f},
-		{1366, 768, 90.0f},
-		{1366, 768, 120.0f},
-		{1366, 768, 144.0f},
-		{1366, 768, 165.0f},
-		{1920, 1080, 30.0f},
-		{1920, 1080, 60.0f},
-		{1920, 1080, 90.0f},
-		{1920, 1080, 120.0f},
-		{1920, 1080, 144.0f},
-		{1920, 1080, 165.0f},
-		{2560, 1440, 30.0f},
-		{2560, 1440, 60.0f},
-		{2560, 1440, 90.0f},
-		{2560, 1440, 120.0f},
-		{2560, 1440, 144.0f},
-		{2560, 1440, 165.0f},
-		{3840, 2160, 30.0f},
-		{3840, 2160, 60.0f},
-		{3840, 2160, 90.0f},
-		{3840, 2160, 120.0f},
-		{3840, 2160, 144.0f},
-		{3840, 2160, 165.0f}
-	};
-
-	vddlog("i", "Loading Fallback - no settings found");
-
-	for (const auto& mode : fallbackRes) {
-		int width, height;
-		float refreshRate;
-		tie(width, height, refreshRate) = mode;
-
-		int vsync_num, vsync_den;
-		float_to_vsync(refreshRate, vsync_num, vsync_den);
-
-		stringstream ss;
-		res.push_back(make_tuple(width, height, vsync_num, vsync_den));
-
-
-		ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
-		vddlog("d", ss.str().c_str());
+			vddlog("i", "Loading Fallback - no settings found");
+			for (const auto& mode : fallbackRes) {
+				int width, height;
+				float refreshRate;
+				tie(width, height, refreshRate) = mode;
+				int vsync_num, vsync_den;
+				float_to_vsync(refreshRate, vsync_num, vsync_den);
+				res.push_back(make_tuple(width, height, vsync_num, vsync_den));
+				stringstream ss;
+				ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
+				vddlog("d", ss.str().c_str());
+			}
+			monitorModes = res;
+		}
 	}
 
-	monitorModes = res;
-	return;
+	// EDID override: Only if <parse_edid_res>true</parse_edid_res> in XML and user_edid.bin exists
+	if (parseEdidRes) {
+		const wstring edidname = confpath + L"\\user_edid.bin";
+		if (PathFileExistsW(edidname.c_str())) {
+			try {
+				string edidPath = WStringToString(edidname); // Convert wstring to string using safe conversion
+				monitorModes = EdidParser::load_and_parse_edid(edidPath);
+				vddlog("i", "Overriding monitor modes with user_edid.bin (parse_edid_res = true)");
+				for (const auto& mode : monitorModes) {
+					int width, height, vsync_num, vsync_den;
+					tie(width, height, vsync_num, vsync_den) = mode;
+					stringstream ss;
+					ss << "EDID Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
+					vddlog("d", ss.str().c_str());
+				}
+			}
+			catch (const std::exception& e) {
+				vddlog("e", ("EDID parsing failed: " + string(e.what())).c_str());
+				// Keep existing monitorModes (XML, option.txt, or fallback) on failure
+			}
+		}
+		else {
+			vddlog("w", "parse_edid_res is true, but user_edid.bin not found; keeping current modes");
+		}
+		// Sort and cap monitorModes to 92, 
+		// Sort based on res-sort in xml, (x-desc | y-ass | ref.rate) defaults to x-desc
+		if (!monitorModes.empty()) {
+			// Parse res-sort value
+			bool descending = resSort.find(L"desc") != wstring::npos;
+			if (resSort.find(L"x") != wstring::npos) {
+				std::sort(monitorModes.begin(), monitorModes.end(),
+					[descending](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+						return descending ? std::get<0>(a) > std::get<0>(b) : std::get<0>(a) < std::get<0>(b);
+					});
+			}
+			else if (resSort.find(L"y") != wstring::npos) {
+				std::sort(monitorModes.begin(), monitorModes.end(),
+					[descending](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+						return descending ? std::get<1>(a) > std::get<1>(b) : std::get<1>(a) < std::get<1>(b);
+					});
+			}
+			else if (resSort.find(L"ref.rate") != wstring::npos) {
+				std::sort(monitorModes.begin(), monitorModes.end(),
+					[descending](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+						return descending ? std::get<2>(a) > std::get<2>(b) : std::get<2>(a) < std::get<2>(b);
+					});
+			}
+			else {
+				// Default to x-desc if res-sort is invalid
+				std::sort(monitorModes.begin(), monitorModes.end(),
+					[](const tuple<int, int, int, int>& a, const tuple<int, int, int, int>& b) {
+						return std::get<0>(a) > std::get<0>(b);
+					});
+			}
 
+			// Cap at 92 modes, keeping highest values based on sort
+			if (monitorModes.size() > 92) {
+				monitorModes.resize(92);
+				vddlog("i", "Capped monitorModes to 92, removed lowest-value modes based on sort");
+			}
+		}
+	}
 }
 
 _Use_decl_annotations_
